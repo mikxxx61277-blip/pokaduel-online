@@ -1,8 +1,7 @@
 {
   "name": "pokaduel-online-server",
-  "version": "19.3.0",
+  "version": "19.5.0",
   "private": true,
-  "description": "POKADUEL V19.03 WebSocket server prepared for Render",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
