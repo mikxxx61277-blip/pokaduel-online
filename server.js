@@ -1,12 +1,19 @@
-   'use strict';
+'use strict';
+
 const http=require('http');
 const WebSocket=require('ws');
 const crypto=require('crypto');
 
-const PORT=Number(process.env.PORT||10000), HOST='0.0.0.0', PROTOCOL='pokaduel-v1';
+const PORT=Number(process.env.PORT||10000);
+const HOST='0.0.0.0';
+const PROTOCOL='pokaduel-v1';
+
 const SUPABASE_URL=String(process.env.SUPABASE_URL||'').replace(/\/+$/,'');
 const SUPABASE_SERVICE_ROLE_KEY=String(process.env.SUPABASE_SERVICE_ROLE_KEY||'').trim();
-const clients=new Map(), rooms=new Map(), queue=[];
+
+const clients=new Map();
+const rooms=new Map();
+const queue=[];
 
 function json(res,status,obj){
   res.writeHead(status,{
@@ -28,7 +35,8 @@ function text(res,status,body){
 
 function readJson(req,max=131072){
   return new Promise((resolve,reject)=>{
-    let n=0,parts=[];
+    let n=0;
+    const parts=[];
 
     req.on('data',c=>{
       n+=c.length;
@@ -44,11 +52,7 @@ function readJson(req,max=131072){
 
     req.on('end',()=>{
       try{
-        resolve(
-          JSON.parse(
-            Buffer.concat(parts).toString('utf8')||'{}'
-          )
-        );
+        resolve(JSON.parse(Buffer.concat(parts).toString('utf8')||'{}'));
       }catch(e){
         reject(new Error('INVALID_JSON'));
       }
@@ -109,10 +113,7 @@ function rng(seed){
 }
 
 const SUITS=['♠','♥','♦','♣'];
-const RANKS=[
-  '2','3','4','5','6','7',
-  '8','9','10','J','Q','K','A'
-];
+const RANKS=['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
 
 const RV={
   '2':2,
@@ -148,16 +149,13 @@ function dailyDeck(day){
   }
 
   for(let i=d.length-1;i>0;i--){
-    const j=Math.floor(
-      r()*(i+1)
-    );
-
+    const j=Math.floor(r()*(i+1));
     [d[i],d[j]]=[d[j],d[i]];
   }
 
   const starter=r()<.5?'h':'a';
 
-  return {
+  return{
     deck:d,
     starter
   };
@@ -989,35 +987,15 @@ function freshSharedStats(){
       },
 
       extremeSweeps:0,
-
       winningStraightFlushCols:0,
       winningQuadCols:0,
       remontadaWins:0,
 
       byDiff:{
-        easy:{
-          p:0,
-          w:0,
-          l:0
-        },
-
-        normal:{
-          p:0,
-          w:0,
-          l:0
-        },
-
-        hard:{
-          p:0,
-          w:0,
-          l:0
-        },
-
-        extreme:{
-          p:0,
-          w:0,
-          l:0
-        }
+        easy:{p:0,w:0,l:0},
+        normal:{p:0,w:0,l:0},
+        hard:{p:0,w:0,l:0},
+        extreme:{p:0,w:0,l:0}
       }
     },
 
@@ -1359,9 +1337,7 @@ function applyStatEvent(
 
   if(e.mode==='ai'){
     const a=s.ai;
-
-    const won=
-      e.winner==='h';
+    const won=e.winner==='h';
 
     a.played++;
 
@@ -1481,9 +1457,11 @@ function applyStatEvent(
 
     s.local.played++;
 
-    e.winner==='h'?
-      s.local.j1Wins++:
+    if(e.winner==='h'){
+      s.local.j1Wins++;
+    }else{
       s.local.j2Wins++;
+    }
 
     s.history.unshift({
       ts,
@@ -1508,15 +1486,11 @@ function applyStatEvent(
   return s;
 }
 
-async function loadSharedStatsByHash(
-  profileHash
-){
+async function loadSharedStatsByHash(profileHash){
   const prof=
     await sb(
       'player_stats_profiles?profile_hash=eq.'+
-      encodeURIComponent(
-        profileHash
-      )+
+      encodeURIComponent(profileHash)+
       '&select=baseline_json',
       {
         method:'GET'
@@ -1532,35 +1506,9 @@ async function loadSharedStatsByHash(
     );
   }
 
-  const s=
-    normalizeSharedStats(
-      prof[0].baseline_json
-    );
-
-  const events=
-    await sb(
-      'player_stats_events?profile_hash=eq.'+
-      encodeURIComponent(
-        profileHash
-      )+
-      '&select=event_json,created_at&order=created_at.asc',
-      {
-        method:'GET'
-      }
-    );
-
-  for(
-    const row of
-    (events||[])
-  ){
-    applyStatEvent(
-      s,
-      row.event_json,
-      row.created_at
-    );
-  }
-
-  return s;
+  return normalizeSharedStats(
+    prof[0].baseline_json
+  );
 }
 
 async function postStatsInit(
@@ -1701,6 +1649,101 @@ async function postStatsLoad(
   }
 }
 
+async function postStatsSave(
+  req,
+  res
+){
+  try{
+    const p=
+      await readJson(req);
+
+    const code=
+      validateSyncCode(
+        p.syncCode
+      );
+
+    const h=
+      statsHash(code);
+
+    const stats=
+      normalizeSharedStats(
+        p.stats
+      );
+
+    const prof=
+      await sb(
+        'player_stats_profiles?profile_hash=eq.'+
+        encodeURIComponent(h)+
+        '&select=profile_hash',
+        {
+          method:'GET'
+        }
+      );
+
+    if(
+      !prof ||
+      !prof.length
+    ){
+      return json(
+        res,
+        404,
+        {
+          ok:false,
+          error:
+            'STATS_PROFILE_NOT_FOUND'
+        }
+      );
+    }
+
+    await sb(
+      'player_stats_profiles?profile_hash=eq.'+
+      encodeURIComponent(h),
+      {
+        method:'PATCH',
+
+        headers:{
+          Prefer:
+            'return=minimal'
+        },
+
+        body:
+          JSON.stringify({
+            baseline_json:stats,
+            updated_at:
+              new Date().toISOString()
+          })
+      }
+    );
+
+    return json(
+      res,
+      200,
+      {
+        ok:true,
+        stats
+      }
+    );
+
+  }catch(e){
+
+    const m=
+      String(
+        e&&e.message||e
+      );
+
+    return json(
+      res,
+      m.startsWith('BAD_')?
+        400:
+        500,
+      {
+        ok:false,
+        error:m
+      }
+    );
+  }
+}
+
 async function postStatsEvent(
   req,
   res
@@ -1801,6 +1844,7 @@ async function postStatsEvent(
 const server=
   http.createServer(
     async(req,res)=>{
+
       if(
         req.method==='OPTIONS'
       ){
@@ -1825,7 +1869,7 @@ const server=
           {
             ok:true,
             app:'POKADUEL',
-            version:'19.07',
+            version:'19.08',
             rooms:rooms.size,
             clients:clients.size,
 
@@ -1835,7 +1879,8 @@ const server=
                 SUPABASE_SERVICE_ROLE_KEY
               ),
 
-            statsSync:true
+            statsSync:true,
+            statsMode:'snapshot'
           }
         );
       }
@@ -1855,6 +1900,16 @@ const server=
         req.url==='/stats/load'
       ){
         return postStatsLoad(
+          req,
+          res
+        );
+      }
+
+      if(
+        req.method==='POST' &&
+        req.url==='/stats/save'
+      ){
+        return postStatsSave(
           req,
           res
         );
@@ -1895,7 +1950,7 @@ const server=
       return text(
         res,
         200,
-        'POKADUEL V19.07 WebSocket + Daily Duel + Stats Sync server is online.'
+        'POKADUEL V19.08 WebSocket + Daily Duel + Stats Snapshot Sync server is online.'
       );
     }
   );
@@ -2153,6 +2208,7 @@ function relay(
 wss.on(
   'connection',
   ws=>{
+
     clients.set(
       ws,
       {
@@ -2339,7 +2395,7 @@ server.listen(
   HOST,
   ()=>{
     console.log(
-      `POKADUEL V19.07 listening on http://${HOST}:${PORT}`
+      `POKADUEL V19.08 listening on http://${HOST}:${PORT}`
     );
   }
 );
