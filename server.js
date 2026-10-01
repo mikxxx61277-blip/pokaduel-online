@@ -949,7 +949,7 @@ encodeURIComponent(day)+
     ...r,
     rank:i+1,
     result_json:
-      r&&r.result_json&&typeof r.result_json===''object''
+      r&&r.result_json&&typeof r.result_json==='object'
         ? r.result_json
         : null
   })
