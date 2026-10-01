@@ -924,9 +924,9 @@ async function getRanking(
 
     const q=
       'daily_duel_results?duel_day=eq.'+
-      encodeURIComponent(day)+
-      '&select=player_id,player_name,won,columns_won,non_win_total,non_win_worst,win_total,created_at'+
-      '&order=won.desc,columns_won.desc,non_win_total.asc,non_win_worst.asc,win_total.desc,created_at.asc';
+encodeURIComponent(day)+
+'&select=player_id,player_name,won,columns_won,non_win_total,non_win_worst,win_total,result_json,created_at'+
+'&order=won.desc,columns_won.desc,non_win_total.asc,non_win_worst.asc,win_total.desc,created_at.asc';
 
     const rows=
       await sb(
@@ -945,11 +945,15 @@ async function getRanking(
 
         rows:
           (rows||[]).map(
-            (r,i)=>({
-              ...r,
-              rank:i+1
-            })
-          )
+  (r,i)=>({
+    ...r,
+    rank:i+1,
+    result_json:
+      r&&r.result_json&&typeof r.result_json===''object''
+        ? r.result_json
+        : null
+  })
+)
       }
     );
 
@@ -1869,7 +1873,7 @@ const server=
           {
             ok:true,
             app:'POKADUEL',
-            version:'19.08',
+            version:'19.09',
             rooms:rooms.size,
             clients:clients.size,
 
