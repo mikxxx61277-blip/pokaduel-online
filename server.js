@@ -1003,13 +1003,15 @@ function freshSharedStats(){
       }
     },
 
-    local:{
+      local:{
       played:0,
       j1Wins:0,
       j2Wins:0
     },
 
-    history:[]
+    history:[],
+
+    playerState:null
   };
 }
 
@@ -1167,7 +1169,26 @@ function normalizeSharedStats(raw){
             ).slice(0,160)
         })):
       [];
+  if(
+    r.playerState &&
+    typeof r.playerState==='object'
+  ){
+    try{
+      const playerStateText=
+        JSON.stringify(
+          r.playerState
+        );
 
+      if(
+        playerStateText.length<=50000
+      ){
+        out.playerState=
+          JSON.parse(
+            playerStateText
+          );
+      }
+    }catch(e){}
+  }
   return out;
 }
 
@@ -1873,7 +1894,7 @@ const server=
           {
             ok:true,
             app:'POKADUEL',
-            version:'19.09',
+            version:'19.10',
             rooms:rooms.size,
             clients:clients.size,
 
@@ -1954,7 +1975,7 @@ const server=
       return text(
         res,
         200,
-        'POKADUEL V19.08 WebSocket + Daily Duel + Stats Snapshot Sync server is online.'
+       'POKADUEL V19.10 WebSocket + Daily Duel + Player State Sync server is online.'
       );
     }
   );
@@ -2399,7 +2420,7 @@ server.listen(
   HOST,
   ()=>{
     console.log(
-      `POKADUEL V19.08 listening on http://${HOST}:${PORT}`
+      `POKADUEL V19.10 listening on http://${HOST}:${PORT}`
     );
   }
 );
