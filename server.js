@@ -14,6 +14,22 @@ const SUPABASE_SERVICE_ROLE_KEY=String(process.env.SUPABASE_SERVICE_ROLE_KEY||''
 const clients=new Map();
 const rooms=new Map();
 const queue=[];
+/* V19.11 — suivi serveur des matchs multijoueur classés. */
+const roomMeta=new Map();
+const RECONNECT_GRACE_MS=60000;
+
+function metaFor(room){
+  if(!roomMeta.has(room)){
+    roomMeta.set(room,{
+      active:false,
+      settled:false,
+      matchId:null,
+      disconnected:new Map()
+    });
+  }
+
+  return roomMeta.get(room);
+}
 
 function json(res,status,obj){
   res.writeHead(status,{
@@ -1003,13 +1019,20 @@ function freshSharedStats(){
       }
     },
 
-      local:{
-      played:0,
-      j1Wins:0,
-      j2Wins:0
-    },
+local:{
+  played:0,
+  j1Wins:0,
+  j2Wins:0
+},
 
-    history:[],
+online:{
+  played:0,
+  wins:0,
+  losses:0,
+  forfeits:0
+},
+
+history:[],
 
     playerState:null
   };
@@ -1121,6 +1144,27 @@ function normalizeSharedStats(raw){
       nn(l.j2Wins)
   };
 
+const on=
+  r.online&&
+  typeof r.online==='object'?
+    r.online:
+    {};
+
+out.online={
+  played:
+    nn(on.played),
+
+  wins:
+    nn(on.wins),
+
+  losses:
+    nn(on.losses),
+
+  forfeits:
+    nn(on.forfeits)
+};
+
+
   out.history=
     Array.isArray(r.history)?
       r.history
@@ -1133,10 +1177,11 @@ function normalizeSharedStats(raw){
             Date.now(),
 
           mode:
-            x&&
-            x.mode==='local'?
-              'local':
-              'ai',
+  x&&x.mode==='local'?
+    'local':
+  x&&x.mode==='online'?
+    'online':
+    'ai',
 
           diff:
             [
@@ -1699,7 +1744,7 @@ async function postStatsSave(
       await sb(
         'player_stats_profiles?profile_hash=eq.'+
         encodeURIComponent(h)+
-        '&select=profile_hash',
+        '&select=profile_hash,baseline_json',
         {
           method:'GET'
         }
@@ -1719,6 +1764,18 @@ async function postStatsSave(
         }
       );
     }
+
+/* V19.11 — les statistiques ONLINE sont écrites uniquement par le serveur. */
+try{
+  const current=
+    normalizeSharedStats(
+      prof[0].baseline_json
+    );
+
+  stats.online=
+    current.online;
+
+}catch(e){}
 
     await sb(
       'player_stats_profiles?profile_hash=eq.'+
@@ -1866,6 +1923,549 @@ async function postStatsEvent(
   }
 }
 
+async function loadProfileStatsOptional(profileHash){
+  if(!profileHash){
+    return null;
+  }
+
+  const rows=
+    await sb(
+      'player_stats_profiles?profile_hash=eq.'+
+      encodeURIComponent(profileHash)+
+      '&select=baseline_json',
+      {
+        method:'GET'
+      }
+    );
+
+  if(
+    !rows ||
+    !rows.length
+  ){
+    return null;
+  }
+
+  return normalizeSharedStats(
+    rows[0].baseline_json
+  );
+}
+
+async function saveProfileStatsByHash(
+  profileHash,
+  stats
+){
+  await sb(
+    'player_stats_profiles?profile_hash=eq.'+
+    encodeURIComponent(profileHash),
+    {
+      method:'PATCH',
+
+      headers:{
+        Prefer:
+          'return=minimal'
+      },
+
+      body:
+        JSON.stringify({
+          baseline_json:
+            normalizeSharedStats(stats),
+
+          updated_at:
+            new Date().toISOString()
+        })
+    }
+  );
+}
+
+async function settleOnlineHashes(
+  room,
+  winnerHash,
+  loserHash,
+  opts={}
+){
+  const meta=
+    metaFor(room);
+
+  if(meta.settled){
+    return{
+      ok:false,
+      reason:'ALREADY_SETTLED'
+    };
+  }
+
+  meta.settled=true;
+  meta.active=false;
+
+  /* Même profil sur les deux appareils = TEST.
+     Aucune statistique multijoueur classée n'est modifiée. */
+  if(
+    !winnerHash ||
+    !loserHash ||
+    winnerHash===loserHash
+  ){
+    return{
+      ok:true,
+      test:true
+    };
+  }
+
+  try{
+    const [
+      win,
+      lose
+    ]=
+      await Promise.all([
+        loadProfileStatsOptional(
+          winnerHash
+        ),
+
+        loadProfileStatsOptional(
+          loserHash
+        )
+      ]);
+
+    if(
+      !win ||
+      !lose
+    ){
+      return{
+        ok:false,
+        reason:'PROFILE_MISSING'
+      };
+    }
+
+    win.online.played++;
+    win.online.wins++;
+
+    lose.online.played++;
+    lose.online.losses++;
+
+    if(opts.forfeit){
+      lose.online.forfeits++;
+    }
+
+    const ts=
+      Date.now();
+
+    win.history.unshift({
+      ts,
+      mode:'online',
+      result:'VICTOIRE',
+      score:
+        String(
+          opts.score||
+          '—'
+        ).slice(0,16),
+
+      best:
+        opts.forfeit?
+          'Victoire par abandon':
+          'Multijoueur en ligne'
+    });
+
+    lose.history.unshift({
+      ts,
+      mode:'online',
+      result:'DÉFAITE',
+      score:
+        String(
+          opts.reverseScore||
+          opts.score||
+          '—'
+        ).slice(0,16),
+
+      best:
+        opts.forfeit?
+          'Défaite par abandon':
+          'Multijoueur en ligne'
+    });
+
+    win.history=
+      win.history.slice(0,20);
+
+    lose.history=
+      lose.history.slice(0,20);
+
+    await Promise.all([
+      saveProfileStatsByHash(
+        winnerHash,
+        win
+      ),
+
+      saveProfileStatsByHash(
+        loserHash,
+        lose
+      )
+    ]);
+
+    return{
+      ok:true,
+      test:false
+    };
+
+  }catch(e){
+
+    meta.settled=false;
+    meta.active=true;
+
+    throw e;
+  }
+}
+
+function profileHashFromMessage(m){
+  try{
+    if(
+      !m ||
+      !m.syncCode
+    ){
+      return null;
+    }
+
+    return statsHash(
+      validateSyncCode(
+        m.syncCode
+      )
+    );
+
+  }catch(e){
+
+    return null;
+  }
+}
+
+function scoreOnlineState(state){
+  try{
+    if(
+      !state ||
+      !Array.isArray(state.h) ||
+      !Array.isArray(state.a)
+    ){
+      return null;
+    }
+
+    if(
+      state.h.length!==5 ||
+      state.a.length!==5
+    ){
+      return null;
+    }
+
+    let hw=0;
+    let aw=0;
+
+    for(
+      let i=0;
+      i<5;
+      i++
+    ){
+      const hc=
+        state.h[i];
+
+      const ac=
+        state.a[i];
+
+      if(
+        !Array.isArray(hc) ||
+        !Array.isArray(ac) ||
+        hc.length!==5 ||
+        ac.length!==5
+      ){
+        return null;
+      }
+
+      if(
+        !hc.every(validCard) ||
+        !ac.every(validCard)
+      ){
+        return null;
+      }
+
+      const c=
+        cmp(
+          eval5(hc),
+          eval5(ac)
+        );
+
+      if(c>0){
+        hw++;
+
+      }else if(c<0){
+        aw++;
+      }
+    }
+
+    return{
+      hw,
+      aw
+    };
+
+  }catch(e){
+
+    return null;
+  }
+}
+
+async function settleFromFinalState(
+  ws,
+  state
+){
+  const c=
+    clients.get(ws);
+
+  if(
+    !c ||
+    !c.room
+  ){
+    return;
+  }
+
+  const room=
+    c.room;
+
+  const meta=
+    metaFor(room);
+
+  if(meta.settled){
+    return;
+  }
+
+  const score=
+    scoreOnlineState(
+      state
+    );
+
+  if(
+    !score ||
+    score.hw===score.aw
+  ){
+    return;
+  }
+
+  const set=
+    rooms.get(room);
+
+  const peer=
+    set?
+      [...set].find(
+        p=>p!==ws
+      ):
+      null;
+
+  const pc=
+    peer?
+      clients.get(peer):
+      null;
+
+  const senderWins=
+    score.hw>
+    score.aw;
+
+  await settleOnlineHashes(
+    room,
+
+    senderWins?
+      c.profileHash:
+      (
+        pc&&
+        pc.profileHash
+      ),
+
+    senderWins?
+      (
+        pc&&
+        pc.profileHash
+      ):
+      c.profileHash,
+
+    {
+      forfeit:false,
+
+      score:
+        score.hw+
+        '-'+
+        score.aw,
+
+      reverseScore:
+        score.aw+
+        '-'+
+        score.hw
+    }
+  );
+}
+
+async function settleForfeit(ws){
+  const c=
+    clients.get(ws);
+
+  if(
+    !c ||
+    !c.room
+  ){
+    return;
+  }
+
+  const room=
+    c.room;
+
+  const set=
+    rooms.get(room);
+
+  const peer=
+    set?
+      [...set].find(
+        p=>p!==ws
+      ):
+      null;
+
+  const pc=
+    peer?
+      clients.get(peer):
+      null;
+
+  await settleOnlineHashes(
+    room,
+
+    pc&&
+    pc.profileHash,
+
+    c.profileHash,
+
+    {
+      forfeit:true,
+      score:'ABANDON',
+      reverseScore:'ABANDON'
+    }
+  );
+}
+
+function beginReconnectGrace(ws){
+  const c=
+    clients.get(ws);
+
+  if(
+    !c ||
+    !c.room ||
+    !rooms.has(c.room)
+  ){
+    return false;
+  }
+
+  const room=
+    c.room;
+
+  const set=
+    rooms.get(room);
+
+  const meta=
+    metaFor(room);
+
+  if(
+    !meta.active ||
+    meta.settled ||
+    c.voluntary
+  ){
+    return false;
+  }
+
+  set.delete(ws);
+
+  const seat={
+    role:
+      c.role,
+
+    profileHash:
+      c.profileHash,
+
+    clientId:
+      c.id,
+
+    timer:
+      null
+  };
+
+  meta.disconnected.set(
+    c.role,
+    seat
+  );
+
+  for(const p of set){
+    send(
+      p,
+      {
+        protocol:PROTOCOL,
+        type:'peer_reconnecting',
+        room,
+        seconds:60
+      }
+    );
+  }
+
+  seat.timer=
+    setTimeout(
+      async()=>{
+        const current=
+          meta.disconnected.get(
+            seat.role
+          );
+
+        if(current!==seat){
+          return;
+        }
+
+        meta.disconnected.delete(
+          seat.role
+        );
+
+        const peer=
+          [...set][0];
+
+        const pc=
+          peer?
+            clients.get(peer):
+            null;
+
+        try{
+          await settleOnlineHashes(
+            room,
+
+            pc&&
+            pc.profileHash,
+
+            seat.profileHash,
+
+            {
+              forfeit:true,
+              score:'ABANDON',
+              reverseScore:'ABANDON'
+            }
+          );
+
+        }catch(e){}
+
+        for(const p of set){
+          send(
+            p,
+            {
+              protocol:PROTOCOL,
+              type:'peer_left',
+              room,
+              reason:'timeout'
+            }
+          );
+        }
+
+        if(!set.size){
+          rooms.delete(room);
+          roomMeta.delete(room);
+        }
+
+      },
+      RECONNECT_GRACE_MS
+    );
+
+  return true;
+}
+
 const server=
   http.createServer(
     async(req,res)=>{
@@ -1894,7 +2494,7 @@ const server=
           {
             ok:true,
             app:'POKADUEL',
-            version:'19.10',
+            version:'19.11',
             rooms:rooms.size,
             clients:clients.size,
 
@@ -1905,7 +2505,9 @@ const server=
               ),
 
             statsSync:true,
-            statsMode:'snapshot'
+            statsMode:'snapshot',
+onlineStats:true,
+reconnectGraceSeconds:60
           }
         );
       }
@@ -1975,7 +2577,7 @@ const server=
       return text(
         res,
         200,
-       'POKADUEL V19.10 WebSocket + Daily Duel + Player State Sync server is online.'
+       'POKADUEL V19.11 WebSocket + Daily Duel + Player State + Online Stats server is online.'
       );
     }
   );
@@ -2234,14 +2836,16 @@ wss.on(
   'connection',
   ws=>{
 
-    clients.set(
-      ws,
-      {
-        id:null,
-        room:null,
-        role:null
-      }
-    );
+   clients.set(
+  ws,
+  {
+    id:null,
+    room:null,
+    role:null,
+    profileHash:null,
+    voluntary:false
+  }
+);
 
     ws.on(
       'message',
@@ -2276,6 +2880,102 @@ wss.on(
             ).slice(0,64);
         }
 
+const ph=
+  profileHashFromMessage(m);
+
+if(ph){
+  c.profileHash=
+    ph;
+}
+
+if(
+  m.type==='reconnect_room'
+){
+  const r=
+    norm(m.room);
+
+  const wantedRole=
+    m.role==='host'?
+      'host':
+      'guest';
+
+  const meta=
+    roomMeta.get(r);
+
+  const seat=
+    meta&&
+    meta.disconnected&&
+    meta.disconnected.get(
+      wantedRole
+    );
+
+  if(
+    !r ||
+    !rooms.has(r) ||
+    !seat ||
+    !c.profileHash ||
+    seat.profileHash!==
+      c.profileHash
+  ){
+    send(
+      ws,
+      {
+        protocol:PROTOCOL,
+        type:'error',
+        message:
+          'Reconnexion impossible.'
+      }
+    );
+
+    return;
+  }
+
+  if(seat.timer){
+    clearTimeout(
+      seat.timer
+    );
+  }
+
+  meta.disconnected.delete(
+    wantedRole
+  );
+
+  const set=
+    rooms.get(r);
+
+  set.add(ws);
+
+  c.room=r;
+  c.role=wantedRole;
+  c.voluntary=false;
+
+  send(
+    ws,
+    {
+      protocol:PROTOCOL,
+      type:'joined',
+      room:r,
+      role:wantedRole,
+      reconnected:true
+    }
+  );
+
+  for(const p of set){
+    if(p!==ws){
+      send(
+        p,
+        {
+          protocol:PROTOCOL,
+          type:'peer_reconnected',
+          room:r
+        }
+      );
+    }
+  }
+
+  return;
+}
+
         if(
           m.type===
           'create_room'
@@ -2289,6 +2989,16 @@ wss.on(
             r,
             new Set([ws])
           );
+
+roomMeta.set(
+  r,
+  {
+    active:false,
+    settled:false,
+    matchId:null,
+    disconnected:new Map()
+  }
+);
 
           c.room=r;
           c.role='host';
@@ -2345,6 +3055,16 @@ wss.on(
               new Set([other])
             );
 
+roomMeta.set(
+  r,
+  {
+    active:false,
+    settled:false,
+    matchId:null,
+    disconnected:new Map()
+  }
+);
+
             const oc=
               clients.get(other);
 
@@ -2385,28 +3105,97 @@ wss.on(
           return;
         }
 
-        if(
-          m.type==='game_start' ||
-          m.type==='game_state' ||
-          m.type==='game_rematch'
-        ){
-          relay(
-            ws,
-            m
-          );
+if(
+  m.type==='online_forfeit'
+){
+  c.voluntary=true;
 
-          return;
-        }
+  try{
+    await settleForfeit(
+      ws
+    );
+  }catch(e){}
+
+  relay(
+    ws,
+    {
+      type:'peer_forfeit'
+    }
+  );
+
+  return;
+}
+
+if(
+  m.type==='leave_room'
+){
+  c.voluntary=true;
+
+  leave(ws);
+
+  return;
+}
+
+        if(
+  m.type==='game_start' ||
+  m.type==='game_state' ||
+  m.type==='game_rematch'
+){
+  if(c.room){
+    const meta=
+      metaFor(
+        c.room
+      );
+
+    if(
+      m.type===
+      'game_start'
+    ){
+      meta.active=true;
+      meta.settled=false;
+      meta.matchId=
+        crypto.randomUUID();
+    }
+
+
+
+    if(
+      m.type==='game_state' &&
+      m.state &&
+      m.state.ended===true
+    ){
+      try{
+        await settleFromFinalState(
+          ws,
+          m.state
+        );
+      }catch(e){}
+    }
+  }
+
+  relay(
+    ws,
+    m
+  );
+
+  return;
+}
       }
     );
 
     ws.on(
-      'close',
-      ()=>{
-        leave(ws);
-        clients.delete(ws);
-      }
-    );
+  'close',
+  ()=>{
+    const grace=
+      beginReconnectGrace(ws);
+
+    if(!grace){
+      leave(ws);
+    }
+
+    clients.delete(ws);
+  }
+);
 
     ws.on(
       'error',
@@ -2420,7 +3209,7 @@ server.listen(
   HOST,
   ()=>{
     console.log(
-      `POKADUEL V19.10 listening on http://${HOST}:${PORT}`
+      `POKADUEL V19.11 listening on http://${HOST}:${PORT}`
     );
   }
 );
