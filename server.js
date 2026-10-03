@@ -2849,7 +2849,7 @@ wss.on(
 
     ws.on(
       'message',
-      raw=>{
+      async raw=>{
         let m;
 
         try{
