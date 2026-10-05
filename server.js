@@ -3186,7 +3186,10 @@ if(
         meta.latestState=
           m.state;
       }
-    }
+
+meta.latestStateRole=
+  c.role || null;
+}
 
     if(
       m.type==='game_state' &&
