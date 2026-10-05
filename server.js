@@ -2969,6 +2969,8 @@ if(
         protocol:PROTOCOL,
         type:'game_state',
         state:meta.latestState,
+
+ stateRole:meta.latestStateRole || null,
         reconnected:true
       }
     );
