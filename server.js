@@ -2960,6 +2960,20 @@ if(
     }
   );
 
+  if(
+    meta.latestState
+  ){
+    send(
+      ws,
+      {
+        protocol:PROTOCOL,
+        type:'game_state',
+        state:meta.latestState,
+        reconnected:true
+      }
+    );
+  }
+
   for(const p of set){
     if(p!==ws){
       send(
