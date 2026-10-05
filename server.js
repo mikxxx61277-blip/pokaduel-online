@@ -3157,7 +3157,22 @@ if(
         crypto.randomUUID();
     }
 
-
+    if(
+      m.type==='game_state' &&
+      m.state
+    ){
+      try{
+        meta.latestState=
+          JSON.parse(
+            JSON.stringify(
+              m.state
+            )
+          );
+      }catch(e){
+        meta.latestState=
+          m.state;
+      }
+    }
 
     if(
       m.type==='game_state' &&
