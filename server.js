@@ -2902,21 +2902,59 @@ if(
   const meta=
     roomMeta.get(r);
 
-  const seat=
-    meta&&
-    meta.disconnected&&
-    meta.disconnected.get(
-      wantedRole
-    );
+  let seat=
+  meta&&
+  meta.disconnected&&
+  meta.disconnected.get(
+    wantedRole
+  );
 
-  if(
-    !r ||
-    !rooms.has(r) ||
-    !seat ||
-    !c.profileHash ||
-    seat.profileHash!==
-      c.profileHash
-  ){
+if(
+  !seat &&
+  r &&
+  rooms.has(r) &&
+  c.profileHash
+){
+  const set=
+    rooms.get(r);
+
+  for(const oldWs of set){
+    if(oldWs===ws)continue;
+
+    const oldClient=
+      clients.get(oldWs);
+
+    if(
+      oldClient &&
+      oldClient.role===wantedRole &&
+      oldClient.profileHash===
+        c.profileHash
+    ){
+      try{
+        oldWs.terminate();
+      }catch(e){}
+
+      set.delete(oldWs);
+
+      seat={
+        profileHash:
+          c.profileHash,
+        timer:null
+      };
+
+      break;
+    }
+  }
+}
+
+if(
+  !r ||
+  !rooms.has(r) ||
+  !seat ||
+  !c.profileHash ||
+  seat.profileHash!==
+    c.profileHash
+){
     send(
       ws,
       {
