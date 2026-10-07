@@ -2925,25 +2925,43 @@ if(
       clients.get(oldWs);
 
     if(
-      oldClient &&
-      oldClient.role===wantedRole &&
-      oldClient.profileHash===
-        c.profileHash
-    ){
-      try{
-        oldWs.terminate();
-      }catch(e){}
+  oldClient &&
+  oldClient.role===wantedRole &&
+  oldClient.profileHash===
+    c.profileHash
+){
+  /*
+    L'ancienne connexion est un fantôme.
+    On la neutralise AVANT de la fermer afin que
+    son événement "close" ne soit jamais interprété
+    comme une nouvelle déconnexion du joueur.
+  */
+  try{
+    oldClient.voluntary=true;
+    oldClient.room=null;
+    oldClient.role=null;
+  }catch(e){}
 
-      set.delete(oldWs);
+  try{
+    set.delete(oldWs);
+  }catch(e){}
 
-      seat={
-        profileHash:
-          c.profileHash,
-        timer:null
-      };
+  try{
+    clients.delete(oldWs);
+  }catch(e){}
 
-      break;
-    }
+  try{
+    oldWs.terminate();
+  }catch(e){}
+
+  seat={
+    profileHash:
+      c.profileHash,
+    timer:null
+  };
+
+  break;
+}
   }
 }
 
