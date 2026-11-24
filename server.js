@@ -1995,6 +1995,7 @@ async function settleOnlineHashes(
 
   meta.settled=true;
   meta.active=false;
+  meta.settling=true;
 
   /* Même profil sur les deux appareils = TEST.
      Aucune statistique multijoueur classée n'est modifiée. */
@@ -2003,6 +2004,7 @@ async function settleOnlineHashes(
     !loserHash ||
     winnerHash===loserHash
   ){
+    meta.settling=false;
     return{
       ok:true,
       test:true
@@ -2028,6 +2030,9 @@ async function settleOnlineHashes(
       !win ||
       !lose
     ){
+      meta.settling=false;
+      meta.settled=false;
+      meta.active=true;
       return{
         ok:false,
         reason:'PROFILE_MISSING'
@@ -2100,6 +2105,7 @@ async function settleOnlineHashes(
     });
     if (!settlement || settlement.ok !== true) throw new Error('MATCH_SETTLEMENT_FAILED');
 
+    meta.settling=false;
     return{
       ok:true,
       test:false
@@ -2107,6 +2113,7 @@ async function settleOnlineHashes(
 
   }catch(e){
 
+    meta.settling=false;
     meta.settled=false;
     meta.active=true;
 
@@ -3223,7 +3230,7 @@ if(
 
     if(
       m.type===
-      'game_start'
+      'game_start' && !meta.active && !meta.settling
     ){
       meta.active=true;
       meta.settled=false;
