@@ -1756,6 +1756,37 @@ function preserveProfileProgress(previous, incoming) {
     for(const k of ['uniqueBeaten','uniqueHumanWins','modesWon','difficultiesWon'])prestige[k]=union(p[k],q[k]);
     out.prestigeSync={...x,...y,prestige,days:union(x.days,y.days)};
   }
+
+  if(a.dailyHistoryV3326 || b.dailyHistoryV3326){
+    const x=obj(a.dailyHistoryV3326),y=obj(b.dailyHistoryV3326);
+    const h={...x,...y};
+    for(const k of ['validatedDays','weeklyRewards','weeklyBonusRewards'])h[k]=union(x[k],y[k]).sort();
+    h.totalStars=Math.max(max(x.totalStars,y.totalStars),h.validatedDays.length+3*h.weeklyBonusRewards.length);
+    h.recoveryV1805=!!(x.recoveryV1805||y.recoveryV1805);
+    out.dailyHistoryV3326=h;
+  }
+  if(a.weeklyEventsV2726 || b.weeklyEventsV2726){
+    const x=obj(a.weeklyEventsV2726),y=obj(b.weeklyEventsV2726),monday=max(x.monday,y.monday),events=new Map();
+    for(const e of [...(Array.isArray(x.events)?x.events:[]),...(Array.isArray(y.events)?y.events:[])]){
+      if(!e||typeof e!=='object'||(monday&&Number(e.ts)<monday))continue;
+      const id=String(e.id||[e.ts||0,e.diff||'',e.score||'',e.won?'1':'0'].join('|'));
+      if(!events.has(id))events.set(id,e);
+    }
+    out.weeklyEventsV2726={...x,...y,monday,events:[...events.values()].sort((p,q)=>Number(p.ts)-Number(q.ts)).slice(-300)};
+  }
+  if(a.dailyChallengesV3326 || b.dailyChallengesV3326){
+    const x=obj(a.dailyChallengesV3326),y=obj(b.dailyChallengesV3326);
+    const date=[String(x.date||''),String(y.date||'')].sort().pop();
+    const p=x.date===date?x:{},q=y.date===date?y:{};
+    const tasks=new Map();
+    for(const t of [...(Array.isArray(p.tasks)?p.tasks:[]),...(Array.isArray(q.tasks)?q.tasks:[])]){
+      if(!t||typeof t!=='object'||t.id==null)continue;
+      const old=tasks.get(t.id)||{},goal=Math.max(1,Number(old.goal||t.goal)||1),progress=Math.min(goal,max(old.progress,t.progress));
+      tasks.set(t.id,{...t,...old,goal,progress,done:!!(old.done||t.done||progress>=goal)});
+    }
+    const list=[...tasks.values()];
+    out.dailyChallengesV3326={...p,...q,date,tasks:list,validated:!!(p.validated||q.validated||list.filter(t=>t.done).length>=2),rewarded:!!(p.rewarded||q.rewarded),gamesToday:max(p.gamesToday,q.gamesToday),dailyWinsInRow:max(p.dailyWinsInRow,q.dailyWinsInRow),lastGameWon:!!(p.lastGameWon||q.lastGameWon)};
+  }
   return Object.keys(out).length?out:null;
 }
 
