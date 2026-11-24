@@ -1731,6 +1731,34 @@ function statsWouldRegress(current, next) {
   return false;
 }
 
+// Preserve only known cumulative fields; never maximize lives or current streaks.
+function preserveProfileProgress(previous, incoming) {
+  const obj=v=>v && typeof v==='object' && !Array.isArray(v)?v:{};
+  const a=obj(previous), b=obj(incoming);
+  const out={...a,...b};
+  const max=(x,y)=>Math.max(nn(x),nn(y));
+  const union=(x,y)=>[...new Set([...(Array.isArray(x)?x:[]),...(Array.isArray(y)?y:[])].filter(v=>typeof v==='string'))];
+  if(a.progression || b.progression){
+    const x=obj(a.progression),y=obj(b.progression);
+    out.progression={...x,...y,xp:max(x.xp,y.xp),perfectWeeks:{...obj(x.perfectWeeks),...obj(y.perfectWeeks)}};
+    for(const k of Object.keys(obj(x.perfectWeeks))) if(x.perfectWeeks[k]===true)out.progression.perfectWeeks[k]=true;
+  }
+  if(a.dailyHistory || b.dailyHistory){
+    const x=obj(a.dailyHistory),y=obj(b.dailyHistory);
+    out.dailyHistory={...x,...y,totalStars:max(x.totalStars,y.totalStars)};
+    for(const k of ['validatedDays','weeklyRewards','weeklyBonusRewards'])out.dailyHistory[k]=union(x[k],y[k]);
+  }
+  if(a.regularityDays || b.regularityDays)out.regularityDays=union(a.regularityDays,b.regularityDays);
+  if(a.prestigeSync || b.prestigeSync){
+    const x=obj(a.prestigeSync),y=obj(b.prestigeSync),p=obj(x.prestige),q=obj(y.prestige);
+    const prestige={...p,...q};
+    for(const k of ['extremeBest','hardPlusBest','humanDistinctBest','rematchWins','winningHands','royals','comebacks','multiplayerWins','dailyPlayed','dailyWins','dailyBest','perfectNonEasy','totalWins','totalGames','chameleon','overallBest','dominationBest'])prestige[k]=max(p[k],q[k]);
+    for(const k of ['uniqueBeaten','uniqueHumanWins','modesWon','difficultiesWon'])prestige[k]=union(p[k],q[k]);
+    out.prestigeSync={...x,...y,prestige,days:union(x.days,y.days)};
+  }
+  return Object.keys(out).length?out:null;
+}
+
 async function postStatsSave(
   req,
   res
@@ -1784,8 +1812,9 @@ async function postStatsSave(
       return json(res,409,{ok:false,error:'STATS_REGRESSION',stats:current});
     }
     stats.online = current.online;
-    if (current.playerState && !stats.playerState) {
-      stats.playerState = current.playerState;
+    stats.playerState = preserveProfileProgress(current.playerState, stats.playerState);
+    if (stats.playerState && JSON.stringify(stats.playerState).length > 50000) {
+      return json(res,409,{ok:false,error:'PROFILE_STATE_TOO_LARGE',stats:current});
     }
     // Conditional update: a concurrent writer must not be silently overwritten.
     const stamp = prof[0].updated_at;
