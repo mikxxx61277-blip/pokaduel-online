@@ -2086,11 +2086,19 @@ async function settleOnlineHashes(
     lose.history=
       lose.history.slice(0,20);
 
-    await Promise.all([
-      saveProfileStatsByHash(winnerHash, win.history[0], true, false),
-
-      saveProfileStatsByHash(loserHash, lose.history[0], false, !!opts.forfeit)
-    ]);
+    if (!meta.matchId) throw new Error('MATCH_ID_MISSING');
+    const settlement = await sb('rpc/pd_settle_match_v3365', {
+      method:'POST',
+      body:JSON.stringify({
+        p_match_id:meta.matchId,
+        p_winner:winnerHash,
+        p_loser:loserHash,
+        p_win_entry:win.history[0],
+        p_lose_entry:lose.history[0],
+        p_forfeit:!!opts.forfeit
+      })
+    });
+    if (!settlement || settlement.ok !== true) throw new Error('MATCH_SETTLEMENT_FAILED');
 
     return{
       ok:true,
