@@ -1719,6 +1719,18 @@ async function postStatsLoad(
   }
 }
 
+function statsWouldRegress(current, next) {
+  for (const k of ['played','wins','losses','bestStreak','bestMargin','extremeSweeps','winningStraightFlushCols','winningQuadCols','remontadaWins']) {
+    if (next.ai[k] < current.ai[k]) return true;
+  }
+  for (const d of ['easy','normal','hard','extreme']) {
+    for (const k of ['p','w','l']) if (next.ai.byDiff[d][k] < current.ai.byDiff[d][k]) return true;
+  }
+  for (const k of ['5-0','4-1','3-2']) if (next.ai.scoreWins[k] < current.ai.scoreWins[k]) return true;
+  for (const k of ['played','j1Wins','j2Wins']) if (next.local[k] < current.local[k]) return true;
+  return false;
+}
+
 async function postStatsSave(
   req,
   res
@@ -1744,7 +1756,7 @@ async function postStatsSave(
       await sb(
         'player_stats_profiles?profile_hash=eq.'+
         encodeURIComponent(h)+
-        '&select=profile_hash,baseline_json',
+        '&select=profile_hash,baseline_json,updated_at',
         {
           method:'GET'
         }
@@ -1765,37 +1777,28 @@ async function postStatsSave(
       );
     }
 
-/* V19.11 — les statistiques ONLINE sont écrites uniquement par le serveur. */
-try{
-  const current=
-    normalizeSharedStats(
-      prof[0].baseline_json
+    // V33.65: reject regressions; never merge counters by summation.
+    const current = normalizeSharedStats(prof[0].baseline_json);
+    const regression = statsWouldRegress(current, stats);
+    if (regression) {
+      return json(res,409,{ok:false,error:'STATS_REGRESSION',stats:current});
+    }
+    stats.online = current.online;
+    if (current.playerState && !stats.playerState) {
+      stats.playerState = current.playerState;
+    }
+    // Conditional update: a concurrent writer must not be silently overwritten.
+    const stamp = prof[0].updated_at;
+    const filter = stamp == null ? '&updated_at=is.null' :
+      '&updated_at=eq.' + encodeURIComponent(stamp);
+    const updated = await sb(
+      'player_stats_profiles?profile_hash=eq.'+encodeURIComponent(h)+filter,
+      {method:'PATCH',headers:{Prefer:'return=representation'},
+       body:JSON.stringify({baseline_json:stats,updated_at:new Date(Math.max(Date.now(), (Date.parse(stamp)||0)+1)).toISOString()})}
     );
-
-  stats.online=
-    current.online;
-
-}catch(e){}
-
-    await sb(
-      'player_stats_profiles?profile_hash=eq.'+
-      encodeURIComponent(h),
-      {
-        method:'PATCH',
-
-        headers:{
-          Prefer:
-            'return=minimal'
-        },
-
-        body:
-          JSON.stringify({
-            baseline_json:stats,
-            updated_at:
-              new Date().toISOString()
-          })
-      }
-    );
+    if (!Array.isArray(updated) || updated.length !== 1) {
+      return json(res,409,{ok:false,error:'STATS_CONFLICT'});
+    }
 
     return json(
       res,
