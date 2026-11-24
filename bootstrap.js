@@ -16,20 +16,309 @@ function hash(v){return crypto.createHash('sha256').update(String(v||'')).digest
 function today(){const p=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Paris',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());const m=Object.fromEntries(p.map(x=>[x.type,x.value]));return `${m.year}-${m.month}-${m.day}`;}
 function clone(x){return JSON.parse(JSON.stringify(x==null?null:x));}
 async function lock(k,fn){const prev=locks.get(k)||Promise.resolve();let release;const mine=new Promise(r=>release=r);locks.set(k,prev.then(()=>mine));await prev;try{return await fn()}finally{release();}}
-async function load(h){const rows=await sb('player_stats_profiles?profile_hash=eq.'+encodeURIComponent(h)+'&select=baseline_json',{method:'GET'});if(!rows||!rows.length)throw new Error('STATS_PROFILE_NOT_FOUND');return rows[0].baseline_json&&typeof rows[0].baseline_json==='object'?clone(rows[0].baseline_json):{};}
-async function save(h,b){await sb('player_stats_profiles?profile_hash=eq.'+encodeURIComponent(h),{method:'PATCH',headers:{Prefer:'return=minimal'},body:JSON.stringify({baseline_json:b,updated_at:new Date().toISOString()})});}
+function freshSharedStats(){
+  return{
+    ai:{
+      played:0,
+      wins:0,
+      losses:0,
+      currentStreak:0,
+      bestStreak:0,
+      bestWinScore:'—',
+      bestMargin:0,
+
+      scoreWins:{
+        '5-0':0,
+        '4-1':0,
+        '3-2':0
+      },
+
+      extremeSweeps:0,
+      winningStraightFlushCols:0,
+      winningQuadCols:0,
+      remontadaWins:0,
+
+      byDiff:{
+        easy:{p:0,w:0,l:0},
+        normal:{p:0,w:0,l:0},
+        hard:{p:0,w:0,l:0},
+        extreme:{p:0,w:0,l:0}
+      }
+    },
+
+local:{
+  played:0,
+  j1Wins:0,
+  j2Wins:0
+},
+
+online:{
+  played:0,
+  wins:0,
+  losses:0,
+  forfeits:0
+},
+
+history:[],
+
+    playerState:null
+  };
+}
+
+function nn(
+  v,
+  max=1000000
+){
+  v=Number(v);
+
+  if(
+    !Number.isFinite(v)
+  ){
+    return 0;
+  }
+
+  return Math.max(
+    0,
+    Math.min(
+      max,
+      Math.floor(v)
+    )
+  );
+}
+
+function normalizeSharedStats(raw){
+  const r=
+    raw&&
+    typeof raw==='object'?
+      raw:
+      {};
+
+  const a=
+    r.ai&&
+    typeof r.ai==='object'?
+      r.ai:
+      {};
+
+  const out=
+    freshSharedStats();
+
+  for(const k of [
+    'played',
+    'wins',
+    'losses',
+    'currentStreak',
+    'bestStreak',
+    'bestMargin',
+    'extremeSweeps',
+    'winningStraightFlushCols',
+    'winningQuadCols',
+    'remontadaWins'
+  ]){
+    out.ai[k]=
+      nn(a[k]);
+  }
+
+  out.ai.bestWinScore=
+    String(
+      a.bestWinScore||
+      '—'
+    ).slice(0,16);
+
+  for(const k of [
+    '5-0',
+    '4-1',
+    '3-2'
+  ]){
+    out.ai.scoreWins[k]=
+      nn(
+        a.scoreWins&&
+        a.scoreWins[k]
+      );
+  }
+
+  for(const d of [
+    'easy',
+    'normal',
+    'hard',
+    'extreme'
+  ]){
+    const x=
+      a.byDiff&&
+      a.byDiff[d]||
+      {};
+
+    out.ai.byDiff[d]={
+      p:nn(x.p),
+      w:nn(x.w),
+      l:nn(x.l)
+    };
+  }
+
+  const l=
+    r.local&&
+    typeof r.local==='object'?
+      r.local:
+      {};
+
+  out.local={
+    played:
+      nn(l.played),
+
+    j1Wins:
+      nn(l.j1Wins),
+
+    j2Wins:
+      nn(l.j2Wins)
+  };
+
+const on=
+  r.online&&
+  typeof r.online==='object'?
+    r.online:
+    {};
+
+out.online={
+  played:
+    nn(on.played),
+
+  wins:
+    nn(on.wins),
+
+  losses:
+    nn(on.losses),
+
+  forfeits:
+    nn(on.forfeits)
+};
+
+
+  out.history=
+    Array.isArray(r.history)?
+      r.history
+        .slice(0,20)
+        .map(x=>({
+          ts:
+            Number(
+              x&&x.ts
+            )||
+            Date.now(),
+
+          mode:
+  x&&x.mode==='local'?
+    'local':
+  x&&x.mode==='online'?
+    'online':
+    'ai',
+
+          diff:
+            [
+              'easy',
+              'normal',
+              'hard',
+              'extreme'
+            ].includes(
+              x&&x.diff
+            )?
+              x.diff:
+              undefined,
+
+          result:
+            String(
+              x&&x.result||
+              ''
+            ).slice(0,24),
+
+          score:
+            String(
+              x&&x.score||
+              ''
+            ).slice(0,16),
+
+          best:
+            String(
+              x&&x.best||
+              ''
+            ).slice(0,160)
+        })):
+      [];
+  if(
+    r.playerState &&
+    typeof r.playerState==='object'
+  ){
+    try{
+      const playerStateText=
+        JSON.stringify(
+          r.playerState
+        );
+
+      if(
+        playerStateText.length<=50000
+      ){
+        out.playerState=
+          JSON.parse(
+            playerStateText
+          );
+      }
+    }catch(e){}
+  }
+  return out;
+}
+
+function statsWouldRegress(current, next) {
+  for (const k of ['played','wins','losses','bestStreak','bestMargin','extremeSweeps','winningStraightFlushCols','winningQuadCols','remontadaWins']) {
+    if (next.ai[k] < current.ai[k]) return true;
+  }
+  for (const d of ['easy','normal','hard','extreme']) {
+    for (const k of ['p','w','l']) if (next.ai.byDiff[d][k] < current.ai.byDiff[d][k]) return true;
+  }
+  for (const k of ['5-0','4-1','3-2']) if (next.ai.scoreWins[k] < current.ai.scoreWins[k]) return true;
+  for (const k of ['played','j1Wins','j2Wins']) if (next.local[k] < current.local[k]) return true;
+  return false;
+}
+
+// Preserve only known cumulative fields; never maximize lives or current streaks.
+function preserveProfileProgress(previous, incoming) {
+  const obj=v=>v && typeof v==='object' && !Array.isArray(v)?v:{};
+  const a=obj(previous), b=obj(incoming);
+  const out={...a,...b};
+  const max=(x,y)=>Math.max(nn(x),nn(y));
+  const union=(x,y)=>[...new Set([...(Array.isArray(x)?x:[]),...(Array.isArray(y)?y:[])].filter(v=>typeof v==='string'))];
+  if(a.progression || b.progression){
+    const x=obj(a.progression),y=obj(b.progression);
+    out.progression={...x,...y,xp:max(x.xp,y.xp),perfectWeeks:{...obj(x.perfectWeeks),...obj(y.perfectWeeks)}};
+    for(const k of Object.keys(obj(x.perfectWeeks))) if(x.perfectWeeks[k]===true)out.progression.perfectWeeks[k]=true;
+  }
+  if(a.dailyHistory || b.dailyHistory){
+    const x=obj(a.dailyHistory),y=obj(b.dailyHistory);
+    out.dailyHistory={...x,...y,totalStars:max(x.totalStars,y.totalStars)};
+    for(const k of ['validatedDays','weeklyRewards','weeklyBonusRewards'])out.dailyHistory[k]=union(x[k],y[k]);
+  }
+  if(a.regularityDays || b.regularityDays)out.regularityDays=union(a.regularityDays,b.regularityDays);
+  if(a.prestigeSync || b.prestigeSync){
+    const x=obj(a.prestigeSync),y=obj(b.prestigeSync),p=obj(x.prestige),q=obj(y.prestige);
+    const prestige={...p,...q};
+    for(const k of ['extremeBest','hardPlusBest','humanDistinctBest','rematchWins','winningHands','royals','comebacks','multiplayerWins','dailyPlayed','dailyWins','dailyBest','perfectNonEasy','totalWins','totalGames','chameleon','overallBest','dominationBest'])prestige[k]=max(p[k],q[k]);
+    for(const k of ['uniqueBeaten','uniqueHumanWins','modesWon','difficultiesWon'])prestige[k]=union(p[k],q[k]);
+    out.prestigeSync={...x,...y,prestige,days:union(x.days,y.days)};
+  }
+  return Object.keys(out).length?out:null;
+}
+
+
+async function load(h){const rows=await sb('player_stats_profiles?profile_hash=eq.'+encodeURIComponent(h)+'&select=baseline_json,updated_at',{method:'GET'});if(!rows||!rows.length)throw new Error('STATS_PROFILE_NOT_FOUND');const b=rows[0].baseline_json&&typeof rows[0].baseline_json==='object'?clone(rows[0].baseline_json):{};Object.defineProperty(b,'__pdStamp',{value:rows[0].updated_at,enumerable:false});return b;}
+async function save(h,b,stamp=b.__pdStamp){if(!stamp)throw new Error('STATS_CONFLICT');const rows=await sb('player_stats_profiles?profile_hash=eq.'+encodeURIComponent(h)+'&updated_at=eq.'+encodeURIComponent(stamp),{method:'PATCH',headers:{Prefer:'return=representation'},body:JSON.stringify({baseline_json:b,updated_at:new Date(Math.max(Date.now(),(Date.parse(stamp)||0)+1)).toISOString()})});if(!Array.isArray(rows)||rows.length!==1)throw new Error('STATS_CONFLICT');}
 function fresh(lang='fr'){return{schema:'POKADUEL_ECONOMY_V1',lives:MAX,regenAnchor:Date.now(),language:/^(fr|en|de|es|it|pt)$/.test(lang)?lang:'fr',dailyDate:today(),dailyFreeUsed:false,recentRewardNonces:[],updatedAt:Date.now()};}
 function normalize(x){const now=Date.now();x=x&&typeof x==='object'?clone(x):fresh();x.schema='POKADUEL_ECONOMY_V1';x.lives=Math.max(0,Math.min(MAX,Math.floor(Number(x.lives)||0)));x.regenAnchor=Number(x.regenAnchor)||now;x.language=/^(fr|en|de|es|it|pt)$/.test(String(x.language||''))?String(x.language):'fr';x.dailyDate=/^\d{4}-\d{2}-\d{2}$/.test(String(x.dailyDate||''))?String(x.dailyDate):today();x.dailyFreeUsed=!!x.dailyFreeUsed;x.recentRewardNonces=Array.isArray(x.recentRewardNonces)?x.recentRewardNonces.map(String).slice(-20):[];if(x.dailyDate!==today()){x.dailyDate=today();x.dailyFreeUsed=false;x.updatedAt=now}if(x.lives>=MAX){x.lives=MAX;x.regenAnchor=now}else{const add=Math.floor(Math.max(0,now-x.regenAnchor)/REGEN);if(add>0){x.lives=Math.min(MAX,x.lives+add);x.regenAnchor+=add*REGEN;if(x.lives>=MAX)x.regenAnchor=now;x.updatedAt=now}}x.updatedAt=Number(x.updatedAt)||now;return x;}
 function economyOf(b){const ps=b.playerState&&typeof b.playerState==='object'?b.playerState:(b.playerState={});if(!ps.serverEconomy){let lang='fr';try{lang=String(ps.accountSync&&ps.accountSync.language&&ps.accountSync.language.value||'fr')}catch(e){}ps.serverEconomy=fresh(lang)}ps.serverEconomy=normalize(ps.serverEconomy);return ps.serverEconomy;}
 function publicState(e){e=normalize(e);return{schema:e.schema,lives:e.lives,maxLives:MAX,regenMinutes:30,nextLifeSeconds:e.lives>=MAX?0:Math.max(0,Math.ceil((REGEN-(Date.now()-e.regenAnchor))/1000)),regenAnchor:e.regenAnchor,language:e.language,dailyDate:e.dailyDate,dailyFreeUsed:e.dailyFreeUsed,updatedAt:e.updatedAt,serverNow:Date.now()};}
-function status(m){if(m==='STATS_PROFILE_NOT_FOUND')return 404;if(m==='NO_LIFE')return 409;if(['BAD_AD_RECEIPT','AD_TOO_SHORT','AD_RECEIPT_REPLAY'].includes(m))return 403;if(String(m).startsWith('BAD_'))return 400;return 500;}
+function status(m){if(m==='STATS_PROFILE_NOT_FOUND')return 404;if(['NO_LIFE','STATS_CONFLICT','STATS_REGRESSION','PROFILE_STATE_TOO_LARGE'].includes(m))return 409;if(['BAD_AD_RECEIPT','AD_TOO_SHORT','AD_RECEIPT_REPLAY'].includes(m))return 403;if(String(m).startsWith('BAD_'))return 400;return 500;}
 async function mutate(body,fn){const h=hash(validCode(body.syncCode));return lock(h,async()=>{const b=await load(h),e=economyOf(b),result=await fn(e,b,h);e.updatedAt=Date.now();await save(h,b);return{economy:publicState(e),result};});}
 function b64(x){return Buffer.from(x).toString('base64url');}
 function sign(p){return crypto.createHmac('sha256',SECRET).update(p).digest('base64url');}
 function makeReceipt(h){const p=b64(JSON.stringify({h,iat:Date.now(),exp:Date.now()+AD_TTL,n:crypto.randomBytes(16).toString('hex')}));return p+'.'+sign(p);}
 function verifyReceipt(token,h){const [p,s]=String(token||'').split('.');if(!p||!s)throw new Error('BAD_AD_RECEIPT');const expected=sign(p),a=Buffer.from(s),b=Buffer.from(expected);if(a.length!==b.length||!crypto.timingSafeEqual(a,b))throw new Error('BAD_AD_RECEIPT');let d;try{d=JSON.parse(Buffer.from(p,'base64url').toString('utf8'))}catch(e){throw new Error('BAD_AD_RECEIPT')}const now=Date.now();if(d.h!==h||now>Number(d.exp)||now<Number(d.iat))throw new Error('BAD_AD_RECEIPT');if(now-Number(d.iat)<AD_MIN)throw new Error('AD_TOO_SHORT');return d;}
 async function handleEconomy(req,res){try{const body=await readJson(req);if(req.url==='/economy/state'){const h=hash(validCode(body.syncCode));const out=await lock(h,async()=>{const b=await load(h);return{economy:publicState(economyOf(b)),result:{type:'state'}}});return json(res,200,{ok:true,...out})}if(req.url==='/economy/consume'){const kind=body.kind==='daily'?'daily':'standard';const h=hash(validCode(body.syncCode));const started=process.hrtime.bigint();let rpcMs=0;const out=await lock(h,async()=>{const rpcStart=process.hrtime.bigint();const data=await sb('rpc/pokaduel_consume_life_atomic',{method:'POST',body:JSON.stringify({p_profile_hash:h,p_kind:kind})});rpcMs=Number(process.hrtime.bigint()-rpcStart)/1e6;const e=normalize(data.economy);return{economy:publicState(e),result:data.result}});const totalMs=Number(process.hrtime.bigint()-started)/1e6;console.info('[ECONOMY_CONSUME_TIMING]',JSON.stringify({rpcMs:Math.round(rpcMs),totalMs:Math.round(totalMs),kind,ok:true}));res.setHeader('Server-Timing','supabase;dur='+rpcMs.toFixed(1)+', economy;dur='+totalMs.toFixed(1));return json(res,200,{ok:true,...out})}if(req.url==='/economy/language'){const lang=String(body.language||'');if(!/^(fr|en|de|es|it|pt)$/.test(lang))throw new Error('BAD_LANGUAGE');const out=await mutate(body,async e=>{e.language=lang;return{language:lang}});return json(res,200,{ok:true,...out})}if(req.url==='/economy/ad-start'){const h=hash(validCode(body.syncCode));await load(h);return json(res,200,{ok:true,receipt:makeReceipt(h),minimumViewSeconds:Math.ceil(AD_MIN/1000)})}if(req.url==='/economy/reward'){const h=hash(validCode(body.syncCode)),r=verifyReceipt(body.receipt,h);const out=await lock(h,async()=>{const b=await load(h),e=economyOf(b);if(e.recentRewardNonces.includes(String(r.n)))throw new Error('AD_RECEIPT_REPLAY');e.recentRewardNonces.push(String(r.n));e.recentRewardNonces=e.recentRewardNonces.slice(-20);if(e.lives<MAX)e.lives++;if(e.lives>=MAX)e.regenAnchor=Date.now();e.updatedAt=Date.now();await save(h,b);return{economy:publicState(e),result:{rewarded:true,amount:1}}});return json(res,200,{ok:true,...out})}return json(res,404,{ok:false,error:'NOT_FOUND'})}catch(e){const m=String(e&&e.message||e);return json(res,status(m),{ok:false,error:m})}}
-async function authoritativeStatsSave(req,res){try{const p=await readJson(req),h=hash(validCode(p.syncCode));return lock(h,async()=>{const cur=await load(h),incoming=p.stats&&typeof p.stats==='object'?clone(p.stats):{};if(cur.online)incoming.online=clone(cur.online);const cps=cur.playerState&&typeof cur.playerState==='object'?cur.playerState:{},ips=incoming.playerState&&typeof incoming.playerState==='object'?incoming.playerState:(incoming.playerState={});ips.serverEconomy=cps.serverEconomy?normalize(cps.serverEconomy):fresh(String(ips.accountSync&&ips.accountSync.language&&ips.accountSync.language.value||'fr'));await save(h,incoming);return json(res,200,{ok:true,stats:incoming})})}catch(e){const m=String(e&&e.message||e);return json(res,status(m),{ok:false,error:m})}}
+async function authoritativeStatsSave(req,res){try{const p=await readJson(req),h=hash(validCode(p.syncCode));return lock(h,async()=>{const cur=await load(h),incoming=p.stats&&typeof p.stats==='object'?clone(p.stats):{};if(statsWouldRegress(normalizeSharedStats(cur),normalizeSharedStats(incoming)))return json(res,409,{ok:false,error:'STATS_REGRESSION',stats:cur});if(cur.online)incoming.online=clone(cur.online);incoming.playerState=preserveProfileProgress(cur.playerState,incoming.playerState);const cps=cur.playerState&&typeof cur.playerState==='object'?cur.playerState:{},ips=incoming.playerState&&typeof incoming.playerState==='object'?incoming.playerState:(incoming.playerState={});ips.serverEconomy=cps.serverEconomy?normalize(cps.serverEconomy):fresh(String(ips.accountSync&&ips.accountSync.language&&ips.accountSync.language.value||'fr'));if(JSON.stringify(incoming.playerState).length>50000)throw new Error('PROFILE_STATE_TOO_LARGE');await save(h,incoming,cur.__pdStamp);return json(res,200,{ok:true,stats:incoming})})}catch(e){const m=String(e&&e.message||e);return json(res,status(m),{ok:false,error:m})}}
 async function authoritativeStatsInit(req,res){try{const p=await readJson(req),h=hash(validCode(p.syncCode));return lock(h,async()=>{const rows=await sb('player_stats_profiles?profile_hash=eq.'+encodeURIComponent(h)+'&select=profile_hash,baseline_json',{method:'GET'});if(!rows||!rows.length){const b=p.stats&&typeof p.stats==='object'?clone(p.stats):{},ps=b.playerState&&typeof b.playerState==='object'?b.playerState:(b.playerState={});delete ps.serverEconomy;economyOf(b);await sb('player_stats_profiles',{method:'POST',headers:{Prefer:'return=minimal'},body:JSON.stringify({profile_hash:h,baseline_json:b})})}const b=await load(h);return json(res,200,{ok:true,stats:b})})}catch(e){const m=String(e&&e.message||e);return json(res,status(m),{ok:false,error:m})}}
 const original=http.createServer.bind(http);
 http.createServer=function(listener){return original(async(req,res)=>{if(req.method==='GET'&&req.url==='/health')return json(res,200,{ok:true,app:'POKADUEL',version:'20.00',economyServer:true,economyAuthority:'server',maxLives:MAX,regenMinutes:30,dailyFreeServer:true,languageServer:true,rewardedReceipt:true,adMinimumViewSeconds:Math.ceil(AD_MIN/1000)});if(req.method==='POST'&&req.url.startsWith('/economy/'))return handleEconomy(req,res);if(req.method==='POST'&&req.url==='/stats/save')return authoritativeStatsSave(req,res);if(req.method==='POST'&&req.url==='/stats/init')return authoritativeStatsInit(req,res);return listener(req,res)});};
