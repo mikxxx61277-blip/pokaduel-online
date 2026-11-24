@@ -1953,31 +1953,28 @@ async function loadProfileStatsOptional(profileHash){
   );
 }
 
-async function saveProfileStatsByHash(
-  profileHash,
-  stats
-){
-  await sb(
-    'player_stats_profiles?profile_hash=eq.'+
-    encodeURIComponent(profileHash),
-    {
-      method:'PATCH',
-
-      headers:{
-        Prefer:
-          'return=minimal'
-      },
-
-      body:
-        JSON.stringify({
-          baseline_json:
-            normalizeSharedStats(stats),
-
-          updated_at:
-            new Date().toISOString()
-        })
-    }
-  );
+// V33.65: apply only the online match delta to the latest profile.
+async function saveProfileStatsByHash(profileHash, matchEntry, won, forfeit){
+  const path = 'player_stats_profiles?profile_hash=eq.'+encodeURIComponent(profileHash);
+  for(let attempt=0;attempt<5;attempt++){
+    const rows=await sb(path+'&select=baseline_json,updated_at',{method:'GET'});
+    if(!rows || rows.length!==1) throw new Error('STATS_PROFILE_NOT_FOUND');
+    const current=normalizeSharedStats(rows[0].baseline_json);
+    current.online.played++;
+    current.online[won?'wins':'losses']++;
+    if(!won && forfeit) current.online.forfeits++;
+    current.history.unshift(matchEntry);
+    current.history=current.history.slice(0,20);
+    const stamp=rows[0].updated_at;
+    const filter=stamp==null?'&updated_at=is.null':'&updated_at=eq.'+encodeURIComponent(stamp);
+    const updated=await sb(path+filter,{
+      method:'PATCH',headers:{Prefer:'return=representation'},
+      body:JSON.stringify({baseline_json:current,updated_at:new Date(Math.max(Date.now(),(Date.parse(stamp)||0)+1)).toISOString()})
+    });
+    if(Array.isArray(updated)&&updated.length===1)return;
+    if(!Array.isArray(updated)||updated.length>1)throw new Error('STATS_UNEXPECTED_UPDATE');
+  }
+  throw new Error('STATS_CONFLICT');
 }
 
 async function settleOnlineHashes(
@@ -2090,15 +2087,9 @@ async function settleOnlineHashes(
       lose.history.slice(0,20);
 
     await Promise.all([
-      saveProfileStatsByHash(
-        winnerHash,
-        win
-      ),
+      saveProfileStatsByHash(winnerHash, win.history[0], true, false),
 
-      saveProfileStatsByHash(
-        loserHash,
-        lose
-      )
+      saveProfileStatsByHash(loserHash, lose.history[0], false, !!opts.forfeit)
     ]);
 
     return{
