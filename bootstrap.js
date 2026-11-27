@@ -382,13 +382,14 @@ function activeAccountLease(h){const l=accountLeases.get(h);if(l&&l.until>Date.n
 function guardAccountWriter(req,h){const l=activeAccountLease(h);if(req.pdAccount){if(!l||l.owner!==req.pdAccount.owner)throw Error('ACCOUNT_LEASE_EXPIRED');l.until=Date.now()+ACCOUNT_LEASE_MS;}else if(l)throw Error('ACCOUNT_DEVICE_ACTIVE');}
 function requestProfileHash(req,p){return req.pdAccount?req.pdAccount.h:hash(validCode(p.syncCode));}
 function accountRevision(b){const x=clone(b);if(x&&x.playerState)delete x.playerState.serverEconomy;function stable(v){if(v===null||typeof v!=='object')return JSON.stringify(v);if(Array.isArray(v))return '['+v.map(stable).join(',')+']';return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+stable(v[k])).join(',')+'}';}return hash(stable(x));}
-async function verifyAccount(req){
+async function verifyAccount(req,lobbyOnly=false){
  if(SUPABASE_URL!==ACCOUNT_TEST_URL)throw Error('ACCOUNT_TEST_ONLY');
  const bearer=String(req.headers.authorization||'');
  if(!/^Bearer [A-Za-z0-9_.-]{40,8192}$/.test(bearer))throw Error('ACCOUNT_AUTH_REQUIRED');
  const rr=await fetch(ACCOUNT_TEST_URL+'/auth/v1/user',{headers:{apikey:ACCOUNT_PUBLIC_KEY,Authorization:bearer},signal:AbortSignal.timeout(10000)});
  if(rr.status===401||rr.status===403)throw Error('ACCOUNT_AUTH_REQUIRED');if(!rr.ok)throw Error('ACCOUNT_AUTH_UNAVAILABLE');
  const u=await rr.json();if(!u.id||!u.email_confirmed_at||u.is_anonymous||!/^[a-f0-9-]{36}$/i.test(u.id))throw Error('ACCOUNT_AUTH_REQUIRED');
+ if(lobbyOnly)return {uid:u.id};
  const link=await sb('pd_account_profile_links?user_id=eq.'+encodeURIComponent(u.id)+'&select=profile_hash');
  if(!Array.isArray(link)||link.length!==1||!/^[a-f0-9]{64}$/.test(link[0].profile_hash))throw Error('ACCOUNT_NOT_LINKED');
  // V34.09: the JWT was verified by Auth /user above. Bind a page instance to the verified session ID, not the rotating access token.
@@ -399,8 +400,45 @@ async function verifyAccount(req){
  if(claims.sub!==u.id||typeof claims.session_id!=='string'||!/^[a-f0-9-]{36}$/i.test(claims.session_id))throw Error('ACCOUNT_AUTH_REQUIRED');
  return {h:link[0].profile_hash,owner:hash('v3409:'+u.id+':'+claims.session_id+':'+instance)};
 }
+
+/* V34.12A private authenticated lobby; NO game, economy or profile writes. Single TEST process only. */
+const alphaRooms=new Map(),alphaSeats=new Map(),alphaAttempts=new Map();
+const ALPHA_TTL=10*60*1000,ALPHA_PRESENT=25000;
+function alphaRemove(room){alphaRooms.delete(room.code);for(const p of room.players)if(alphaSeats.get(p.uid)===room.code)alphaSeats.delete(p.uid);}
+function alphaPrune(now){for(const room of alphaRooms.values())if(room.expires<=now)alphaRemove(room);for(const [uid,a] of alphaAttempts)if(a.until<=now)alphaAttempts.delete(uid);}
+function alphaView(room,uid,now){if(!room)return null;return {code:room.code,role:room.players[0].uid===uid?'J1':'J2',players:room.players.map((p,i)=>({role:'J'+(i+1),you:p.uid===uid,ready:p.ready,connected:now-p.seen<=ALPHA_PRESENT})),bothReady:room.players.length===2&&room.players.every(p=>p.ready&&now-p.seen<=ALPHA_PRESENT),expiresIn:Math.max(0,Math.ceil((room.expires-now)/1000))};}
+async function handleAlphaLobby(req,res){
+ try{
+  const a=await verifyAccount(req,true),p=await readJson(req,2048),uid=a.uid,now=Date.now();
+  alphaPrune(now);const action=p?.action;
+  if(!['create','join','status','ready','leave'].includes(action))return json(res,400,{ok:false,error:'BAD_ACTION'});
+  let room=alphaRooms.get(alphaSeats.get(uid));
+  if(action==='create'||action==='join'){
+   if(room)return json(res,409,{ok:false,error:'ALREADY_IN_ROOM',room:alphaView(room,uid,now)});
+   let limit=alphaAttempts.get(uid);if(!limit){limit={count:0,until:now+60000};alphaAttempts.set(uid,limit);}
+   if(++limit.count>10)return json(res,429,{ok:false,error:'TRY_LATER'});
+   if(action==='create'){
+    if(alphaRooms.size>=100)return json(res,503,{ok:false,error:'LOBBY_FULL'});
+    let code;do{code=crypto.randomBytes(5).toString('hex').toUpperCase()}while(alphaRooms.has(code));
+    room={code,players:[{uid,ready:false,seen:now}],expires:now+ALPHA_TTL};alphaRooms.set(code,room);alphaSeats.set(uid,code);
+   }else{
+    const code=String(p.code||'').trim().toUpperCase();if(!/^[A-F0-9]{10}$/.test(code))return json(res,400,{ok:false,error:'BAD_ROOM_CODE'});
+    room=alphaRooms.get(code);if(!room||room.players.length!==1)return json(res,404,{ok:false,error:'ROOM_UNAVAILABLE'});
+    room.players.push({uid,ready:false,seen:now});alphaSeats.set(uid,code);room.expires=now+ALPHA_TTL;
+   }
+  }
+  if(action==='leave'&&room){if(room.players[0].uid===uid){alphaRemove(room);}else{room.players=room.players.filter(x=>x.uid!==uid);alphaSeats.delete(uid);room.players[0].ready=false;}room=null;}
+  if(room){const me=room.players.find(x=>x.uid===uid);if(!me)return json(res,403,{ok:false,error:'NOT_MEMBER'});
+   me.seen=now;room.expires=now+ALPHA_TTL;
+   if(action==='ready')me.ready=p.ready===true;
+  }
+  return json(res,200,{ok:true,room:alphaView(room,uid,now),stage:'LOBBY_ONLY'});
+ }catch(e){const m=String(e&&e.message||e);return json(res,m==='ACCOUNT_AUTH_REQUIRED'?401:m==='ACCOUNT_TEST_ONLY'?403:503,{ok:false,error:m.startsWith('ACCOUNT_')?m:'LOBBY_UNAVAILABLE'});}
+}
+
 async function handleAccount(req,res,listener){
  const path=req.url.slice('/account'.length);
+ if(path==='/lobby')return handleAlphaLobby(req,res);
  if(!accountPaths.has(path)&&!['/session/open','/session/close'].includes(path))return json(res,404,{ok:false,error:'ACCOUNT_ROUTE_DISABLED'});
  try{
   req.pdAccount=await verifyAccount(req);const h=req.pdAccount.h;req.pdAccount.dailyPlayerId='ACCT-'+hash('POKADUEL-DAILY-ACCOUNT-V1:'+h).slice(0,32);
@@ -416,5 +454,5 @@ async function handleAccount(req,res,listener){
 }
 
 const original=http.createServer.bind(http);
-http.createServer=function(listener){return original(async(req,res)=>{if(req.method==='OPTIONS'&&req.url.startsWith('/account/'))return json(res,204,{});if(req.method==='POST'&&req.url.startsWith('/account/'))return handleAccount(req,res,listener);if(req.method==='GET'&&req.url==='/health')return json(res,200,{ok:true,app:'POKADUEL',version:'20.00',accountSoloTest:SUPABASE_URL===ACCOUNT_TEST_URL,accountTransferV34082:SUPABASE_URL===ACCOUNT_TEST_URL,accountRefreshV3409:SUPABASE_URL===ACCOUNT_TEST_URL,accountDailyV3410:SUPABASE_URL===ACCOUNT_TEST_URL,accountRewardTestV34113:SUPABASE_URL===ACCOUNT_TEST_URL,economyServer:true,economyAuthority:'server',maxLives:MAX,regenMinutes:30,dailyFreeServer:true,languageServer:true,rewardedReceipt:true,adMinimumViewSeconds:Math.ceil(AD_MIN/1000)});if(req.method==='POST'&&req.url.startsWith('/economy/'))return handleEconomy(req,res);if(req.method==='POST'&&req.url==='/stats/solo-result')return recordSoloResult(req,res);if(req.method==='POST'&&req.url==='/stats/save')return authoritativeStatsSave(req,res);if(req.method==='POST'&&req.url==='/stats/init')return authoritativeStatsInit(req,res);return listener(req,res)});};
+http.createServer=function(listener){return original(async(req,res)=>{if(req.method==='OPTIONS'&&req.url.startsWith('/account/'))return json(res,204,{});if(req.method==='POST'&&req.url.startsWith('/account/'))return handleAccount(req,res,listener);if(req.method==='GET'&&req.url==='/health')return json(res,200,{ok:true,app:'POKADUEL',version:'20.00',accountSoloTest:SUPABASE_URL===ACCOUNT_TEST_URL,accountTransferV34082:SUPABASE_URL===ACCOUNT_TEST_URL,accountRefreshV3409:SUPABASE_URL===ACCOUNT_TEST_URL,accountDailyV3410:SUPABASE_URL===ACCOUNT_TEST_URL,accountRewardTestV34113:SUPABASE_URL===ACCOUNT_TEST_URL,accountLobbyV3412A:SUPABASE_URL===ACCOUNT_TEST_URL,economyServer:true,economyAuthority:'server',maxLives:MAX,regenMinutes:30,dailyFreeServer:true,languageServer:true,rewardedReceipt:true,adMinimumViewSeconds:Math.ceil(AD_MIN/1000)});if(req.method==='POST'&&req.url.startsWith('/economy/'))return handleEconomy(req,res);if(req.method==='POST'&&req.url==='/stats/solo-result')return recordSoloResult(req,res);if(req.method==='POST'&&req.url==='/stats/save')return authoritativeStatsSave(req,res);if(req.method==='POST'&&req.url==='/stats/init')return authoritativeStatsInit(req,res);return listener(req,res)});};
 require('./server.js');
