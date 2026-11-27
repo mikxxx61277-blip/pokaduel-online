@@ -763,8 +763,20 @@ async function postDaily(
     const p=
       await readJson(req);
 
+    // Authenticated daily ranking: never trust a client-supplied identity.
+    if(req.pdAccount){
+      p.playerId=req.pdAccount.dailyPlayerId;
+      p.playerName='JOUEUR '+p.playerId.slice(-8).toUpperCase();
+    }else if(/^ACCT-/i.test(String(p.playerId||'').trim())){
+      throw new Error('BAD_PLAYER_ID');
+    }
     const v=
       validateSnapshot(p);
+    if(req.pdAccount){
+      const existing=await sb('daily_duel_results?duel_day=eq.'+encodeURIComponent(v.day)+'&player_id=eq.'+encodeURIComponent(v.playerId)+'&select=*',{method:'GET'});
+      if(existing?.length)return json(res,200,{ok:true,row:existing[0],alreadyRanked:true});
+      if(req.pdAccount.dailyPermitDay!==v.day)return json(res,403,{ok:false,error:'DAILY_OFFICIAL_NOT_AUTHORIZED'});
+    }
 
     const s=
       scoreSnapshot(p);
