@@ -8,7 +8,7 @@ const AD_MIN=Math.max(3000,Number(process.env.POKADUEL_AD_MIN_VIEW_MS||15000));
 const AD_TTL=10*60*1000;
 const SECRET=String(process.env.POKADUEL_ECONOMY_SECRET||SUPABASE_SERVICE_ROLE_KEY||'POKADUEL_DEV_ONLY_CHANGE_ME');
 const locks=new Map();
-function json(res,status,obj){res.writeHead(status,{'content-type':'application/json; charset=utf-8','access-control-allow-origin':'*','access-control-allow-methods':'GET,POST,OPTIONS','access-control-allow-headers':'content-type,authorization','cache-control':'no-store'});res.end(JSON.stringify(obj));}
+function json(res,status,obj){res.writeHead(status,{'content-type':'application/json; charset=utf-8','access-control-allow-origin':'*','access-control-allow-methods':'GET,POST,OPTIONS','access-control-allow-headers':'content-type,authorization,x-pd-instance','cache-control':'no-store'});res.end(JSON.stringify(obj));}
 function readJson(req,max=131072){return new Promise((resolve,reject)=>{let n=0,parts=[];req.on('data',c=>{n+=c.length;if(n>max){reject(new Error('BODY_TOO_LARGE'));req.destroy();return}parts.push(c)});req.on('end',()=>{try{resolve(JSON.parse(Buffer.concat(parts).toString('utf8')||'{}'))}catch(e){reject(new Error('INVALID_JSON'))}});req.on('error',reject)});}
 async function sb(path,options={}){if(!SUPABASE_URL||!SUPABASE_SERVICE_ROLE_KEY)throw new Error('SUPABASE_SERVER_NOT_CONFIGURED');const r=await fetch(SUPABASE_URL+'/rest/v1/'+path,{...options,headers:{apikey:SUPABASE_SERVICE_ROLE_KEY,Authorization:'Bearer '+SUPABASE_SERVICE_ROLE_KEY,'Content-Type':'application/json',...(options.headers||{})}});const txt=await r.text();let data=null;try{data=txt?JSON.parse(txt):null}catch(e){data=txt}if(!r.ok){const rpcError=path==='rpc/pokaduel_consume_life_atomic'&&data&&typeof data.message==='string'&&['NO_LIFE','STATS_PROFILE_NOT_FOUND'].includes(data.message)?data.message:null;const x=new Error(rpcError||'SUPABASE_'+r.status);x.detail=data;throw x}return data;}
 function validCode(v){v=String(v||'').trim().toUpperCase();if(!/^[A-Z0-9-]{16,80}$/.test(v))throw new Error('BAD_SYNC_CODE');return v;}
@@ -391,7 +391,13 @@ async function verifyAccount(req){
  const u=await rr.json();if(!u.id||!u.email_confirmed_at||u.is_anonymous||!/^[a-f0-9-]{36}$/i.test(u.id))throw Error('ACCOUNT_AUTH_REQUIRED');
  const link=await sb('pd_account_profile_links?user_id=eq.'+encodeURIComponent(u.id)+'&select=profile_hash');
  if(!Array.isArray(link)||link.length!==1||!/^[a-f0-9]{64}$/.test(link[0].profile_hash))throw Error('ACCOUNT_NOT_LINKED');
- return {h:link[0].profile_hash,owner:hash(bearer)};
+ // V34.09: the JWT was verified by Auth /user above. Bind a page instance to the verified session ID, not the rotating access token.
+ const instance=req.headers['x-pd-instance'];
+ if(instance===undefined)return {h:link[0].profile_hash,owner:hash(bearer)};
+ if(typeof instance!=='string'||!/^[a-f0-9]{32}$/.test(instance))throw Error('ACCOUNT_AUTH_REQUIRED');
+ let claims;try{claims=JSON.parse(Buffer.from(bearer.slice(7).split('.')[1],'base64url').toString('utf8'));}catch(_){throw Error('ACCOUNT_AUTH_REQUIRED')}
+ if(claims.sub!==u.id||typeof claims.session_id!=='string'||!/^[a-f0-9-]{36}$/i.test(claims.session_id))throw Error('ACCOUNT_AUTH_REQUIRED');
+ return {h:link[0].profile_hash,owner:hash('v3409:'+u.id+':'+claims.session_id+':'+instance)};
 }
 async function handleAccount(req,res){
  const path=req.url.slice('/account'.length);
@@ -408,5 +414,5 @@ async function handleAccount(req,res){
 }
 
 const original=http.createServer.bind(http);
-http.createServer=function(listener){return original(async(req,res)=>{if(req.method==='OPTIONS'&&req.url.startsWith('/account/'))return json(res,204,{});if(req.method==='POST'&&req.url.startsWith('/account/'))return handleAccount(req,res);if(req.method==='GET'&&req.url==='/health')return json(res,200,{ok:true,app:'POKADUEL',version:'20.00',accountSoloTest:SUPABASE_URL===ACCOUNT_TEST_URL,accountTransferV34082:SUPABASE_URL===ACCOUNT_TEST_URL,economyServer:true,economyAuthority:'server',maxLives:MAX,regenMinutes:30,dailyFreeServer:true,languageServer:true,rewardedReceipt:true,adMinimumViewSeconds:Math.ceil(AD_MIN/1000)});if(req.method==='POST'&&req.url.startsWith('/economy/'))return handleEconomy(req,res);if(req.method==='POST'&&req.url==='/stats/solo-result')return recordSoloResult(req,res);if(req.method==='POST'&&req.url==='/stats/save')return authoritativeStatsSave(req,res);if(req.method==='POST'&&req.url==='/stats/init')return authoritativeStatsInit(req,res);return listener(req,res)});};
+http.createServer=function(listener){return original(async(req,res)=>{if(req.method==='OPTIONS'&&req.url.startsWith('/account/'))return json(res,204,{});if(req.method==='POST'&&req.url.startsWith('/account/'))return handleAccount(req,res);if(req.method==='GET'&&req.url==='/health')return json(res,200,{ok:true,app:'POKADUEL',version:'20.00',accountSoloTest:SUPABASE_URL===ACCOUNT_TEST_URL,accountTransferV34082:SUPABASE_URL===ACCOUNT_TEST_URL,accountRefreshV3409:SUPABASE_URL===ACCOUNT_TEST_URL,economyServer:true,economyAuthority:'server',maxLives:MAX,regenMinutes:30,dailyFreeServer:true,languageServer:true,rewardedReceipt:true,adMinimumViewSeconds:Math.ceil(AD_MIN/1000)});if(req.method==='POST'&&req.url.startsWith('/economy/'))return handleEconomy(req,res);if(req.method==='POST'&&req.url==='/stats/solo-result')return recordSoloResult(req,res);if(req.method==='POST'&&req.url==='/stats/save')return authoritativeStatsSave(req,res);if(req.method==='POST'&&req.url==='/stats/init')return authoritativeStatsInit(req,res);return listener(req,res)});};
 require('./server.js');
